@@ -53,11 +53,11 @@ def render_set(model_path, source_path, name, iteration, views, gaussians, pipel
             torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(number_int) + '{}'.format(view.category[i])+".png"))
             torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(number_int) + '{}'.format(view.category[i])+".png"))
                
-def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, args):
+def render_sets(dataset : ModelParams,model_path, pipeline : PipelineParams, skip_train : bool, skip_test : bool, args):
     with torch.no_grad():  
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, shuffle=False)
-        checkpoint = os.path.join(args.model_path, 'chkpnt_cconcroskit251'+str(iteration)+'.pth')
+        checkpoint = os.path.join(args.model_path, model_path)
         (model_params, first_iter) = torch.load(checkpoint,map_location=f'cuda:{torch.cuda.current_device()}')
         gaussians.restore(model_params, args, mode='test')
 
@@ -89,9 +89,5 @@ if __name__ == "__main__":
     args = get_combined_args(parser)
     args.include_feature=True
     args.iteration=5
-    
-    iteration=5
-
-    for i in range(iteration):
-        args.iteration=i
-        render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args)
+    model_path='output/ramen/ramen.pth'
+    render_sets(model.extract(args), model_path, pipeline.extract(args), args.skip_train, args.skip_test, args)
