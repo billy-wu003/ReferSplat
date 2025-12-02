@@ -13,6 +13,42 @@ import torch.nn.functional as F
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+
+
+def compute_visibility_labels(gaussians, camera, gt_mask, visibility_filter):
+    x, y, w = gaussians.project_to_pixels(camera)
+    x_idx = x.long()
+    y_idx = y.long()
+    in_bounds = (x_idx >= 0) & (x_idx < camera.image_width) & (y_idx >= 0) & (y_idx < camera.image_height)
+    in_front = w > 0
+    valid_mask = visibility_filter & in_bounds & in_front
+    labels = torch.zeros_like(x, device="cuda", dtype=torch.float32)
+    if valid_mask.any():
+        labels[valid_mask] = gt_mask[0, y_idx[valid_mask], x_idx[valid_mask]].float()
+    return valid_mask, labels
+
+
+def compute_smooth_loss(gaussians, semantic_logits, visibility_mask, k, delta_n):
+    visible_idx = visibility_mask.nonzero(as_tuple=False).squeeze(-1)
+    if visible_idx.numel() <= 1:
+        return torch.zeros(1, device="cuda")
+
+    xyz_visible = gaussians.get_xyz[visible_idx].detach()
+    semantic_visible = semantic_logits[visible_idx]
+    colors_dc = gaussians._features_dc[visible_idx, :3, 0].detach()
+
+    # k-NN on visible Gaussians
+    k = min(k + 1, xyz_visible.shape[0])
+    distances = torch.cdist(xyz_visible, xyz_visible)
+    knn_idx = torch.topk(distances, k=k, dim=1, largest=False).indices[:, 1:]
+
+    sigma_i = semantic_visible.unsqueeze(1).expand(-1, knn_idx.shape[1])
+    sigma_j = semantic_visible[knn_idx]
+
+    color_diff = torch.norm(colors_dc.unsqueeze(1) - colors_dc[knn_idx], dim=-1)
+    weight = torch.exp(-color_diff / max(delta_n, 1e-6))
+
+    return (weight * torch.abs(sigma_i - sigma_j)).mean()
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -77,7 +113,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     sentence_tensor = sentence_tensor.unsqueeze(0).to("cuda")
                     com_loss = multi_pos_cross_entropy(cosine_similarities, sentence_tensor)
                     gt_mask = viewpoint_cam.gt_mask[viewpoint_cam.category[i]].to("cuda")
-                    loss = bce_loss(language_feature, gt_mask)+0.1*com_loss
+                    visibility_mask, view_labels = compute_visibility_labels(gaussians, viewpoint_cam, gt_mask, render_pkg["visibility_filter"])
+                    gaussians.update_vote_statistics(visibility_mask, view_labels, gamma_p=opt.vote_gamma_p, gamma_m=opt.vote_gamma_m)
+                    hard_labels, valid_mask = gaussians.get_hard_labels(opt.vote_mmin)
+                    soft_labels = gaussians.get_soft_labels(opt.vote_eps)
+                    semantic_seed = gaussians.mlp2(gaussians._language_feature)
+                    semantic_logits = gaussians.semantic_head(semantic_seed).squeeze(-1)
+                    smooth_loss = compute_smooth_loss(
+                        gaussians,
+                        semantic_logits,
+                        visibility_mask,
+                        opt.smooth_k,
+                        opt.smooth_delta_n,
+                    )
+                    if valid_mask.any():
+                        loss_hard = F.binary_cross_entropy_with_logits(semantic_logits[valid_mask], hard_labels[valid_mask])
+                        loss_soft = F.binary_cross_entropy_with_logits(semantic_logits[valid_mask], soft_labels[valid_mask])
+                    else:
+                        loss_hard = torch.zeros(1, device="cuda")
+                        loss_soft = torch.zeros(1, device="cuda")
+                    loss = (
+                        bce_loss(language_feature, gt_mask)
+                        + 0.1 * com_loss
+                        + opt.lambda_3d * loss_hard
+                        + opt.lambda_3d_soft * loss_soft
+                        + opt.lambda_smooth * smooth_loss
+                    )
                     loss.backward()
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)

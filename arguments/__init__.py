@@ -84,6 +84,15 @@ class OptimizationParams(ParamGroup):
         self.mlp_lr = 0.0001
         self.cross_attention_lr = 0.0001
         self.language_feature_lr = 0.0025
+        self.vote_gamma_p = 0.1
+        self.vote_gamma_m = 0.1
+        self.vote_mmin = 2.0
+        self.vote_eps = 1e-6
+        self.lambda_3d = 0.5
+        self.lambda_3d_soft = 0.5
+        self.lambda_smooth = 0.05
+        self.smooth_k = 8
+        self.smooth_delta_n = 0.1
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
