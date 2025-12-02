@@ -51,8 +51,15 @@ class GaussianModel:
         self.feature_project=None 
         self.text_language_feature =torch.empty(0)
         self.mlp2=MLP2(16,128).to("cuda")
-        self.mlp3=MLP3(3,128).to("cuda")
+        self.mlp3=MLP3(2,128).to("cuda")
+        self.visibility_mlp = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 1),
+        ).to("cuda")
+        self.gamma = nn.Parameter(torch.zeros(1, device="cuda"))
         self.mlp1=MLP1(1024,128).to("cuda")
+        self.semantic_head = nn.Linear(128, 1).to("cuda")
 
         
         self.max_radii2D = torch.empty(0)
@@ -71,6 +78,8 @@ class GaussianModel:
             param.requires_grad = False
 
         self.cross_attention=CrossAttention(dim=128, num_heads=1).to("cuda")
+        self.vote_positive = torch.zeros(0, device="cuda")
+        self.vote_mass = torch.zeros(0, device="cuda")
     def get_text(self, text):
         inputs = self.tokenizer(text, return_tensors="pt", truncation=True, padding=True).to("cuda")
         with torch.no_grad():
@@ -97,7 +106,12 @@ class GaussianModel:
                 self.mlp1.state_dict(),
                 self.mlp2.state_dict(),
                 self.mlp3.state_dict(),
+                self.visibility_mlp.state_dict(),
+                self.gamma.detach(),
                 self.cross_attention.state_dict(),
+                self.semantic_head.state_dict(),
+                self.vote_positive,
+                self.vote_mass,
             )
         else:
             return (
@@ -116,48 +130,113 @@ class GaussianModel:
             )            
     
     def restore(self, model_args, training_args, mode='train'):
-        if len(model_args) == 17:
-            (self.active_sh_degree, 
-            self._xyz, 
-            self._features_dc, 
+        if len(model_args) == 22:
+            (self.active_sh_degree,
+            self._xyz,
+            self._features_dc,
             self._features_rest,
-            self._scaling, 
+            self._scaling,
             self._rotation, 
             self._opacity,
             self._language_feature,
             self.max_radii2D, 
-            xyz_gradient_accum, 
+            xyz_gradient_accum,
             denom,
-            opt_dict, 
+            opt_dict,
             self.spatial_lr_scale,
             #self.text_language_feature,
             mlp1_params,
             mlp2_params,
             mlp3_params,
+            visibility_mlp_params,
+            gamma_param,
             cross_attention_params,
+            semantic_head_params,
+            vote_positive,
+            vote_mass,
             ) = model_args
             self.mlp1.load_state_dict(mlp1_params)
             self.mlp2.load_state_dict(mlp2_params)
             self.mlp3.load_state_dict(mlp3_params)
+            self.visibility_mlp.load_state_dict(visibility_mlp_params)
+            self.gamma = nn.Parameter(gamma_param.to("cuda"))
             self.cross_attention.load_state_dict(cross_attention_params)
-        elif len(model_args) == 11: 
-            (self.active_sh_degree, 
-            self._xyz, 
-            self._features_dc, 
+            self.semantic_head.load_state_dict(semantic_head_params)
+            self.vote_positive = vote_positive.to("cuda")
+            self.vote_mass = vote_mass.to("cuda")
+        elif len(model_args) == 19:
+            (self.active_sh_degree,
+            self._xyz,
+            self._features_dc,
+            self._features_rest,
+            self._scaling,
+            self._rotation,
+            self._opacity,
+            self._language_feature,
+            self.max_radii2D,
+            xyz_gradient_accum,
+            denom,
+            opt_dict,
+            self.spatial_lr_scale,
+            #self.text_language_feature,
+            mlp1_params,
+            mlp2_params,
+            mlp3_params,
+            visibility_mlp_params,
+            gamma_param,
+            cross_attention_params,) = model_args
+            self.mlp1.load_state_dict(mlp1_params)
+            self.mlp2.load_state_dict(mlp2_params)
+            self.mlp3.load_state_dict(mlp3_params)
+            self.visibility_mlp.load_state_dict(visibility_mlp_params)
+            self.gamma = nn.Parameter(gamma_param.to("cuda"))
+            self.cross_attention.load_state_dict(cross_attention_params)
+            self.vote_positive = torch.zeros_like(self._opacity.squeeze(-1))
+            self.vote_mass = torch.zeros_like(self._opacity.squeeze(-1))
+        elif len(model_args) == 17:
+            (self.active_sh_degree,
+            self._xyz,
+            self._features_dc,
+            self._features_rest,
+            self._scaling,
+            self._rotation,
+            self._opacity,
+            self._language_feature,
+            self.max_radii2D,
+            xyz_gradient_accum,
+            denom,
+            opt_dict,
+            self.spatial_lr_scale,
+            mlp1_params,
+            mlp2_params,
+            mlp3_params,
+            cross_attention_params,) = model_args
+            self.mlp1.load_state_dict(mlp1_params)
+            self.mlp2.load_state_dict(mlp2_params)
+            self.mlp3.load_state_dict(mlp3_params)
+            self.cross_attention.load_state_dict(cross_attention_params)
+            self.vote_positive = torch.zeros_like(self._opacity.squeeze(-1))
+            self.vote_mass = torch.zeros_like(self._opacity.squeeze(-1))
+        elif len(model_args) == 11:
+            (self.active_sh_degree,
+            self._xyz,
+            self._features_dc,
             self._features_rest,
             self._scaling, 
             self._rotation, 
             self._opacity,
             self._language_feature,
-            self.max_radii2D, 
-            xyz_gradient_accum, 
+            self.max_radii2D,
+            xyz_gradient_accum,
             denom,
-            opt_dict, 
+            opt_dict,
             self.spatial_lr_scale) = model_args
-        elif len(model_args) == 12: 
-            (self.active_sh_degree, 
-            self._xyz, 
-            self._features_dc, 
+            self.vote_positive = torch.zeros_like(self._opacity.squeeze(-1))
+            self.vote_mass = torch.zeros_like(self._opacity.squeeze(-1))
+        elif len(model_args) == 12:
+            (self.active_sh_degree,
+            self._xyz,
+            self._features_dc,
             self._features_rest,
             self._scaling, 
             self._rotation, 
@@ -165,8 +244,10 @@ class GaussianModel:
             self.max_radii2D, 
             xyz_gradient_accum, 
             denom,
-            opt_dict, 
+            opt_dict,
             self.spatial_lr_scale) = model_args
+            self.vote_positive = torch.zeros_like(self._opacity.squeeze(-1))
+            self.vote_mass = torch.zeros_like(self._opacity.squeeze(-1))
            
         
         if mode == 'train':
@@ -213,6 +294,40 @@ class GaussianModel:
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
+    def project_to_pixels(self, camera):
+        xyz = self.get_xyz
+        ones = torch.ones((xyz.shape[0], 1), device=xyz.device)
+        homo = torch.cat([xyz, ones], dim=1)
+        clip = homo @ camera.full_proj_transform
+        w = clip[:, 3:4].clamp(min=1e-6)
+        ndc = clip[:, :3] / w
+        x = (ndc[:, 0] * 0.5 + 0.5) * camera.image_width
+        y = (ndc[:, 1] * -0.5 + 0.5) * camera.image_height
+        return x, y, w.squeeze(-1)
+
+    def update_vote_statistics(self, visibility_mask, view_labels, gamma_p=0.1, gamma_m=0.1):
+        if self.vote_positive.numel() == 0 or self.vote_positive.shape[0] != visibility_mask.shape[0]:
+            self.vote_positive = torch.zeros_like(visibility_mask, dtype=torch.float32)
+            self.vote_mass = torch.zeros_like(visibility_mask, dtype=torch.float32)
+        visible_float = visibility_mask.float()
+        pos_increment = visible_float * view_labels.float()
+        mass_increment = visible_float
+        self.vote_positive = (1 - gamma_p) * self.vote_positive + gamma_p * pos_increment
+        self.vote_mass = (1 - gamma_m) * self.vote_mass + gamma_m * mass_increment
+
+    def get_hard_labels(self, min_mass):
+        valid_mask = self.vote_mass >= min_mass
+        hard_labels = torch.full_like(self.vote_positive, 0.5)
+        more_positive = self.vote_positive > (self.vote_mass - self.vote_positive)
+        hard_labels = torch.where(valid_mask & more_positive, torch.ones_like(hard_labels), hard_labels)
+        hard_labels = torch.where(valid_mask & (~more_positive), torch.zeros_like(hard_labels), hard_labels)
+        return hard_labels, valid_mask
+
+    def get_soft_labels(self, eps=1e-6):
+        if self.vote_mass.numel() == 0:
+            return torch.zeros_like(self.get_opacity.squeeze(-1))
+        return torch.clamp(self.vote_positive / (self.vote_mass + eps), 0.0, 1.0)
+
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
@@ -243,6 +358,9 @@ class GaussianModel:
         
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
+        self.vote_positive = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.vote_mass = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -255,10 +373,13 @@ class GaussianModel:
                 
             l = [
                 {'params': [self._language_feature], 'lr': training_args.language_feature_lr, "name": "language_feature"},
-                 {'params': self.mlp1.parameters(), 'lr': training_args.mlp_lr, "name": "mlp1"},
-                 {'params': self.mlp2.parameters(), 'lr': training_args.mlp_lr, "name": "mlp2"},
-                 {'params': self.mlp3.parameters(), 'lr': training_args.mlp_lr, "name": "mlp3"},
-                 {'params': self.cross_attention.parameters(), 'lr': training_args.mlp_lr, "name": "cross_attention"},
+                {'params': self.mlp1.parameters(), 'lr': training_args.mlp_lr, "name": "mlp1"},
+                {'params': self.mlp2.parameters(), 'lr': training_args.mlp_lr, "name": "mlp2"},
+                {'params': self.mlp3.parameters(), 'lr': training_args.mlp_lr, "name": "mlp3"},
+                {'params': self.visibility_mlp.parameters(), 'lr': training_args.mlp_lr, "name": "visibility_mlp"},
+                {'params': [self.gamma], 'lr': training_args.mlp_lr, "name": "gamma"},
+                {'params': self.cross_attention.parameters(), 'lr': training_args.mlp_lr, "name": "cross_attention"},
+                {'params': self.semantic_head.parameters(), 'lr': training_args.mlp_lr, "name": "semantic_head"},
             ]
             self._xyz.requires_grad_(False)
             self._features_dc.requires_grad_(False)
@@ -406,6 +527,9 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+        if self.vote_positive.numel() > 0:
+            self.vote_positive = self.vote_positive[valid_points_mask]
+            self.vote_mass = self.vote_mass[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -449,6 +573,12 @@ class GaussianModel:
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        if self.vote_positive.numel() > 0:
+            self.vote_positive = torch.cat((self.vote_positive, torch.zeros((new_xyz.shape[0]), device="cuda")))
+            self.vote_mass = torch.cat((self.vote_mass, torch.zeros((new_xyz.shape[0]), device="cuda")))
+        else:
+            self.vote_positive = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+            self.vote_mass = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]

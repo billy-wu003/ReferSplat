@@ -56,6 +56,20 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     opacity = pc.get_opacity
     t_token=pc.get_text(sentence).to("cuda")
     t_token=pc.mlp1(t_token)
+    semantic_seed = pc.mlp2(pc._language_feature)
+    view_inv = torch.inverse(viewpoint_camera.world_view_transform)
+    camera_forward = torch.nn.functional.normalize(view_inv[:3, 2], dim=0)
+    view_directions = torch.nn.functional.normalize(means3D - viewpoint_camera.camera_center, dim=1)
+    depth = torch.norm(means3D - viewpoint_camera.camera_center, dim=1, keepdim=True)
+    cos_theta = torch.sum(view_directions * camera_forward.unsqueeze(0), dim=1, keepdim=True)
+    geometry_inputs = torch.cat((depth, cos_theta), dim=1)
+    geometry_features = pc.mlp3(geometry_inputs)
+    g_sem = pc.cross_attention(semantic_seed, geometry_features, t_token)
+    semantic_scores = torch.matmul(g_sem, t_token.transpose(-1, -2).squeeze(0))
+    s_sem = semantic_scores.sum(dim=-1, keepdim=True)
+    f_occ = pc.visibility_mlp(geometry_features)
+    visibility_prob = torch.sigmoid(f_occ)
+    features = visibility_prob * s_sem + (1 - visibility_prob) * pc.gamma
     scales = None
     rotations = None
     cov3D_precomp = None
@@ -82,18 +96,10 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         colors_precomp = override_color
     
 
-    p=pc.mlp3(pc.get_xyz)
-    p=F.normalize(p,dim=-1)
-    x=pc.mlp2(pc._language_feature)
-    g=pc.cross_attention(x,p,t_token)
-    features=torch.matmul(g,t_token.transpose(-1,-2)).squeeze(0)
-    features=features.sum(dim=-1,keepdim=True)
-
-    
-    sorted_indices = torch.argsort(features, descending=True)
+    sorted_indices = torch.argsort(features, dim=0, descending=True)
     indices = sorted_indices[:int(len(sorted_indices) * ratio)].squeeze(1)
-   
-    selected_tensors = g[indices]
+
+    selected_tensors = g_sem[indices]
 
     mean_tensor = torch.mean(selected_tensors, dim=0, keepdim=True)
 
